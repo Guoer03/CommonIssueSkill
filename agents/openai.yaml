@@ -1,0 +1,4 @@
+interface:
+  display_name: "问题记录分类"
+  short_description: "将问题记录分类到 20x20 体系"
+  default_prompt: "使用 $classify-issue-records 按我提供的一级/二级分类标签，对问题概述、问题明细、问题根因和解决方案进行分类。"
