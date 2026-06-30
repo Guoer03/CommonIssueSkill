@@ -33,6 +33,14 @@ class RunPipelineTest(unittest.TestCase):
         self.assertTrue((SKILL_DIR / "references" / "topk_prompt.md").exists())
         self.assertTrue((SKILL_DIR / "references" / "topk_io_contract.md").exists())
 
+    def test_final_prompt_is_assembled_from_principles_and_io_contract(self) -> None:
+        prompt = run_pipeline.load_final_prompt_template()
+
+        self.assertLess(prompt.index("Final Role And Principles"), prompt.index("Final IO Contract"))
+        self.assertIn("candidate_pool", prompt)
+        self.assertTrue((SKILL_DIR / "references" / "final_prompt.md").exists())
+        self.assertTrue((SKILL_DIR / "references" / "final_io_contract.md").exists())
+
     def test_candidate_pool_for_final_removes_topk_confidence(self) -> None:
         self.assertTrue(hasattr(run_pipeline, "candidate_pool_for_final"))
         candidate_pool = run_pipeline.candidate_pool_for_final(

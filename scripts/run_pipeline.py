@@ -349,6 +349,10 @@ def load_topk_prompt_template() -> str:
     return load_prompt_parts(["topk_prompt.md", "topk_io_contract.md"])
 
 
+def load_final_prompt_template() -> str:
+    return load_prompt_parts(["final_prompt.md", "final_io_contract.md"])
+
+
 def pending_topk_records(conn: sqlite3.Connection, limit: int) -> List[sqlite3.Row]:
     return conn.execute(
         """
@@ -474,7 +478,7 @@ def command_final(args: argparse.Namespace) -> None:
         print("No pending final records")
         return
 
-    template = load_template("final_prompt.md")
+    template = load_final_prompt_template()
     endpoint = normalize_endpoint(args.base_url)
     key = api_key(args.api_key_env)
     processed = 0
