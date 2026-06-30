@@ -3,6 +3,9 @@
 ## RAG 复用
 
 - 每条记录只执行一次 RAG 检索，生成 `rag_pool`。
+- RAG 召回结果应使用 JSONL；`scripts/rag_retrieve.py` 预留给内网实现召回逻辑。每行是一条待分类记录与一条历史样例的匹配结果。
+- 每行至少包含 `record_id`、`case_id`、`record`、`level_1`、`level_2`、`similarity`。`record_id` 必须能匹配待分类记录的 `id` 或 `record_id`。
+- `level_1/level_2` 必须来自当前 `classification_options`；taxonomy 外样例应在召回阶段过滤。
 - TopK 使用 `rag_pool` 中相似度最高的 3 条。
 - Final 使用同一个 `rag_pool`，优先选择 `level_1/level_2` 属于候选池的样例，最多 5 条。
 - 候选池内样例不足时，可补充全局高相似样例，但必须标记 `out_of_candidate_pool_reference=true`。
