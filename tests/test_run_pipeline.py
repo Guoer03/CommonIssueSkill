@@ -26,18 +26,26 @@ from run_pipeline import (  # noqa: E402
 
 class RunPipelineTest(unittest.TestCase):
     def test_topk_prompt_is_assembled_from_principles_and_io_contract(self) -> None:
-        prompt = run_pipeline.load_topk_prompt_template()
+        prompt = run_pipeline.build_topk_prompt({"records": [], "classification_options": {}, "rag_results": {}})
 
-        self.assertLess(prompt.index("TopK Role And Principles"), prompt.index("TopK IO Contract"))
+        self.assertLess(prompt.index("## 角色与判断原则"), prompt.index("## 强制输入输出契约"))
+        self.assertLess(prompt.index("## 强制输入输出契约"), prompt.index("## 当前输入"))
         self.assertIn("records", prompt)
+        self.assertNotIn("本文件不放", prompt)
+        self.assertNotIn("不要写在这里", prompt)
+        self.assertNotIn("用于放置", prompt)
         self.assertTrue((SKILL_DIR / "references" / "topk_prompt.md").exists())
         self.assertTrue((SKILL_DIR / "references" / "topk_io_contract.md").exists())
 
     def test_final_prompt_is_assembled_from_principles_and_io_contract(self) -> None:
-        prompt = run_pipeline.load_final_prompt_template()
+        prompt = run_pipeline.build_final_prompt({"items": []})
 
-        self.assertLess(prompt.index("Final Role And Principles"), prompt.index("Final IO Contract"))
+        self.assertLess(prompt.index("## 角色与判断原则"), prompt.index("## 强制输入输出契约"))
+        self.assertLess(prompt.index("## 强制输入输出契约"), prompt.index("## 当前输入"))
         self.assertIn("candidate_pool", prompt)
+        self.assertNotIn("本文件不放", prompt)
+        self.assertNotIn("不要写在这里", prompt)
+        self.assertNotIn("用于放置", prompt)
         self.assertTrue((SKILL_DIR / "references" / "final_prompt.md").exists())
         self.assertTrue((SKILL_DIR / "references" / "final_io_contract.md").exists())
 

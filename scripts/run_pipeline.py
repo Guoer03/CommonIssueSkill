@@ -341,16 +341,58 @@ def load_template(name: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def load_prompt_parts(names: Sequence[str]) -> str:
-    return "\n\n".join(load_template(name).strip() for name in names)
+def prompt_fragment_body(text: str) -> str:
+    lines = text.strip().splitlines()
+    if lines and lines[0].lstrip().startswith("#"):
+        lines = lines[1:]
+    filtered = []
+    for line in lines:
+        if "本文件不放" in line or "不要写在这里" in line or "用于放置" in line:
+            continue
+        filtered.append(line)
+    return "\n".join(filtered).strip()
 
 
-def load_topk_prompt_template() -> str:
-    return load_prompt_parts(["topk_prompt.md", "topk_io_contract.md"])
+def build_stage_prompt(
+    stage_name: str,
+    stage_goal: str,
+    principles_file: str,
+    io_contract_file: str,
+    payload: Mapping[str, Any],
+) -> str:
+    principles = prompt_fragment_body(load_template(principles_file))
+    io_contract = prompt_fragment_body(load_template(io_contract_file))
+    input_json = json.dumps(payload, ensure_ascii=False, indent=2)
+    return "\n\n".join(
+        [
+            f"# {stage_name}",
+            stage_goal.strip(),
+            "## 角色与判断原则\n" + principles,
+            "## 强制输入输出契约\n" + io_contract,
+            "## 当前输入\n```json\n" + input_json + "\n```",
+            "请严格遵守“强制输入输出契约”，只输出契约要求的结果，不要输出额外解释文本。",
+        ]
+    )
 
 
-def load_final_prompt_template() -> str:
-    return load_prompt_parts(["final_prompt.md", "final_io_contract.md"])
+def build_topk_prompt(payload: Mapping[str, Any]) -> str:
+    return build_stage_prompt(
+        "TopK 候选召回任务",
+        "你需要为每条问题记录从给定分类选项中召回候选一级/二级分类。",
+        "topk_prompt.md",
+        "topk_io_contract.md",
+        payload,
+    )
+
+
+def build_final_prompt(payload: Mapping[str, Any]) -> str:
+    return build_stage_prompt(
+        "Final 最终分类任务",
+        "你需要在候选池、内联特征和 RAG 证据约束下，为每条问题记录选择最终唯一一级/二级分类。",
+        "final_prompt.md",
+        "final_io_contract.md",
+        payload,
+    )
 
 
 def pending_topk_records(conn: sqlite3.Connection, limit: int) -> List[sqlite3.Row]:
@@ -415,7 +457,6 @@ def command_topk(args: argparse.Namespace) -> None:
         print("No pending topk records")
         return
 
-    template = load_topk_prompt_template()
     endpoint = normalize_endpoint(args.base_url)
     key = api_key(args.api_key_env)
     processed = 0
@@ -428,7 +469,7 @@ def command_topk(args: argparse.Namespace) -> None:
                 for offset, row in enumerate(group)
             },
         }
-        prompt = template + "\n\n当前输入：\n" + json.dumps(payload, ensure_ascii=False, indent=2)
+        prompt = build_topk_prompt(payload)
         try:
             def run_topk_batch() -> int:
                 raw_xml = call_chat_api(endpoint, key, args.model, prompt, args.timeout, args.temperature, args.max_tokens)
@@ -478,7 +519,6 @@ def command_final(args: argparse.Namespace) -> None:
         print("No pending final records")
         return
 
-    template = load_final_prompt_template()
     endpoint = normalize_endpoint(args.base_url)
     key = api_key(args.api_key_env)
     processed = 0
@@ -500,7 +540,7 @@ def command_final(args: argparse.Namespace) -> None:
                     "rag_results": rag["final_rag"],
                 }
             )
-        prompt = template + "\n\n当前输入：\n" + json.dumps({"items": final_inputs}, ensure_ascii=False, indent=2)
+        prompt = build_final_prompt({"items": final_inputs})
         try:
             def run_final_batch() -> int:
                 raw_xml = call_chat_api(endpoint, key, args.model, prompt, args.timeout, args.temperature, args.max_tokens)
