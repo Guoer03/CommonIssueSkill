@@ -9,7 +9,13 @@
 ```json
 {
   "records": [
-    "问题概述：...\n问题明细：...\n问题根因：...\n解决方案：..."
+    {
+      "id": "record_001",
+      "problem_overview": "问题概述文本",
+      "probelm_details": "问题明细文本",
+      "solution_details": "解决方案文本",
+      "user_solution": "problem_overview、probelm_details、solution_details 三个字段的合并文本"
+    }
   ],
   "classification_options": {
     "一级分类": {
@@ -32,7 +38,11 @@
 
 规则：
 
-- `records` 是字符串数组，每个元素是一条记录。
+- `records` 是对象数组，每个元素是一条记录。
+- 每个 `record` 必须包含 `id`、`problem_overview`、`probelm_details`、`solution_details`、`user_solution`。
+- `id` 是记录稳定标识；`record_index` 仍然必须按输入数组位置输出，从 0 开始。
+- 字段名固定为 `probelm_details`，不要改成 `problem_details`。
+- `user_solution` 是 `problem_overview`、`probelm_details`、`solution_details` 三个字段的合并文本，用作兜底语义判断。
 - `classification_options` 第一层是 `level_1`，第二层是 `level_2`，数组里的 `level3` 只作为辅助信息。
 - `rag_results` 按 `record_index` 关联，每条记录最多使用前 3 条。
 - 只能输出 `classification_options` 中存在的 `level_1/level_2`。

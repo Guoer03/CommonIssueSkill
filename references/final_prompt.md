@@ -11,7 +11,13 @@
   "items": [
     {
       "record_index": 0,
-      "record": "问题概述：...\n问题明细：...\n问题根因：...\n解决方案：...",
+      "record": {
+        "id": "record_001",
+        "problem_overview": "问题概述文本",
+        "probelm_details": "问题明细文本",
+        "solution_details": "解决方案文本",
+        "user_solution": "problem_overview、probelm_details、solution_details 三个字段的合并文本"
+      },
       "candidate_pool": [
         {
           "level_1": "候选一级分类",
@@ -38,6 +44,9 @@
 规则：
 
 - 只能从 `candidate_pool` 中选择最终 `level_1/level_2`。
+- `record` 必须包含 `id`、`problem_overview`、`probelm_details`、`solution_details`、`user_solution`。
+- 字段名固定为 `probelm_details`，不要改成 `problem_details`。
+- `user_solution` 是三个原始字段的合并文本；优先使用结构化字段判断，字段缺失时再参考 `user_solution`。
 - `inline_features` 是该二级分类下全部 level3 补充信息，只能作为判断证据，不允许作为最终分类输出。
 - `rag_results` 只能作为证据，不能引入候选池外分类。
 - `out_of_candidate_pool_reference=true` 的 RAG 样例只可参考表达方式，不可决定分类。

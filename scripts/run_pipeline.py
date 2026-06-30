@@ -32,11 +32,12 @@ REFERENCE_DIR = SKILL_DIR / "references"
 DEFAULT_CLASSIFICATION_OPTIONS = REFERENCE_DIR / "classification_options.json"
 
 FIELD_ALIASES = {
-    "overview": ["问题概述", "overview", "summary", "title"],
-    "detail": ["问题明细", "detail", "description", "desc"],
-    "root_cause": ["问题根因", "root_cause", "cause", "reason"],
-    "solution": ["解决方案", "solution", "resolution", "fix"],
+    "problem_overview": ["problem_overview", "问题概述", "overview", "summary", "title"],
+    "probelm_details": ["probelm_details", "problem_details", "问题明细", "detail", "details", "description", "desc"],
+    "solution_details": ["solution_details", "解决方案", "solution", "resolution", "fix"],
 }
+
+RECORD_SCHEMA_FIELDS = ["id", "problem_overview", "probelm_details", "solution_details", "user_solution"]
 
 EXPORT_COLUMNS = [
     "record_index",
@@ -147,26 +148,58 @@ def first_value(row: Mapping[str, Any], keys: Sequence[str]) -> str:
     return ""
 
 
-def build_record_text(row: Mapping[str, Any], record_column: Optional[str]) -> str:
+def merge_user_solution(record: Mapping[str, str]) -> str:
+    parts = []
+    for field in ["problem_overview", "probelm_details", "solution_details"]:
+        value = str(record.get(field, "")).strip()
+        if value:
+            parts.append(f"{field}: {value}")
+    return "\n".join(parts)
+
+
+def build_record_payload(row: Mapping[str, Any], record_column: Optional[str], record_id: str = "") -> Dict[str, str]:
     if record_column:
         value = str(row.get(record_column, "")).strip()
         if value:
-            return value
+            return {
+                "id": record_id,
+                "problem_overview": "",
+                "probelm_details": "",
+                "solution_details": "",
+                "user_solution": value,
+            }
 
-    parts = []
-    for field, aliases in FIELD_ALIASES.items():
-        value = first_value(row, aliases)
-        if value:
-            label = {
-                "overview": "问题概述",
-                "detail": "问题明细",
-                "root_cause": "问题根因",
-                "solution": "解决方案",
-            }[field]
-            parts.append(f"{label}：{value}")
-    if parts:
-        return "\n".join(parts)
-    return "\n".join(f"{key}：{value}" for key, value in row.items() if str(value).strip())
+    record = {
+        "problem_overview": first_value(row, FIELD_ALIASES["problem_overview"]),
+        "probelm_details": first_value(row, FIELD_ALIASES["probelm_details"]),
+        "solution_details": first_value(row, FIELD_ALIASES["solution_details"]),
+    }
+    user_solution = merge_user_solution(record)
+    if not user_solution:
+        user_solution = "\n".join(f"{key}: {value}" for key, value in row.items() if str(value).strip())
+    return {
+        "id": record_id,
+        "problem_overview": record["problem_overview"],
+        "probelm_details": record["probelm_details"],
+        "solution_details": record["solution_details"],
+        "user_solution": user_solution,
+    }
+
+
+def load_record_payload(value: str) -> Dict[str, str]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return {field: str(parsed.get(field, "")).strip() for field in RECORD_SCHEMA_FIELDS}
+    return {
+        "id": "",
+        "problem_overview": "",
+        "probelm_details": "",
+        "solution_details": "",
+        "user_solution": value,
+    }
 
 
 def load_rag_map(path: Optional[Path]) -> Dict[str, List[Dict[str, Any]]]:
@@ -209,13 +242,18 @@ def command_init(args: argparse.Namespace) -> None:
         conn.execute("delete from final_results")
         for index, row in enumerate(rows):
             record_id = str(row.get("record_id") or row.get("id") or index).strip()
-            record_text = build_record_text(row, args.record_column)
+            record_payload = build_record_payload(row, args.record_column, record_id=record_id)
             conn.execute(
                 """
                 insert into records(record_index, record_id, record_text, rag_pool_json)
                 values (?, ?, ?, ?)
                 """,
-                (index, record_id, record_text, json.dumps(rag_map.get(record_id, []), ensure_ascii=False)),
+                (
+                    index,
+                    record_id,
+                    json.dumps(record_payload, ensure_ascii=False),
+                    json.dumps(rag_map.get(record_id, []), ensure_ascii=False),
+                ),
             )
     manifest = {
         "input": str(args.input),
@@ -360,7 +398,7 @@ def command_topk(args: argparse.Namespace) -> None:
     processed = 0
     for group in batch(rows, args.batch_size):
         payload = {
-            "records": [row["record_text"] for row in group],
+            "records": [load_record_payload(row["record_text"]) for row in group],
             "classification_options": options,
             "rag_results": {
                 str(offset): json.loads(row["rag_pool_json"])[: args.topk_rag_k]
@@ -434,7 +472,7 @@ def command_final(args: argparse.Namespace) -> None:
             final_inputs.append(
                 {
                     "record_index": offset,
-                    "record": row["record_text"],
+                    "record": load_record_payload(row["record_text"]),
                     "candidate_pool": candidates,
                     "rag_results": rag["final_rag"],
                 }

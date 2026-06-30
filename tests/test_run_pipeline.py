@@ -14,10 +14,44 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 RUNNER = SKILL_DIR / "scripts" / "run_pipeline.py"
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
 
-from run_pipeline import DEFAULT_CLASSIFICATION_OPTIONS, RunnerError, run_with_retries  # noqa: E402
+from run_pipeline import (  # noqa: E402
+    DEFAULT_CLASSIFICATION_OPTIONS,
+    RunnerError,
+    build_record_payload,
+    load_record_payload,
+    run_with_retries,
+)
 
 
 class RunPipelineTest(unittest.TestCase):
+    def test_build_record_payload_uses_structured_record_schema(self) -> None:
+        payload = build_record_payload(
+            {
+                "问题概述": "升级失败",
+                "problem_details": "安装包校验失败",
+                "solution_details": "回退版本",
+            },
+            record_column=None,
+            record_id="rec_001",
+        )
+
+        self.assertEqual(payload["id"], "rec_001")
+        self.assertEqual(payload["problem_overview"], "升级失败")
+        self.assertEqual(payload["probelm_details"], "安装包校验失败")
+        self.assertEqual(payload["solution_details"], "回退版本")
+        self.assertIn("problem_overview: 升级失败", payload["user_solution"])
+        self.assertIn("probelm_details: 安装包校验失败", payload["user_solution"])
+        self.assertIn("solution_details: 回退版本", payload["user_solution"])
+
+    def test_load_record_payload_wraps_legacy_plain_text(self) -> None:
+        payload = load_record_payload("问题概述：升级失败")
+
+        self.assertEqual(payload["id"], "")
+        self.assertEqual(payload["problem_overview"], "")
+        self.assertEqual(payload["probelm_details"], "")
+        self.assertEqual(payload["solution_details"], "")
+        self.assertEqual(payload["user_solution"], "问题概述：升级失败")
+
     def test_reference_inputs_are_packaged_with_the_skill(self) -> None:
         self.assertEqual(DEFAULT_CLASSIFICATION_OPTIONS, SKILL_DIR / "references" / "classification_options.json")
         self.assertTrue(DEFAULT_CLASSIFICATION_OPTIONS.exists())
@@ -91,9 +125,14 @@ class RunPipelineTest(unittest.TestCase):
             with sqlite3.connect(workdir / "state.sqlite") as conn:
                 count = conn.execute("select count(*) from records").fetchone()[0]
                 text = conn.execute("select record_text from records order by record_index limit 1").fetchone()[0]
+                payload = json.loads(text)
 
             self.assertEqual(count, 2)
-            self.assertIn("问题根因：系统升级后安装包校验失败", text)
+            self.assertEqual(payload["id"], "0")
+            self.assertEqual(payload["problem_overview"], "升级失败")
+            self.assertEqual(payload["probelm_details"], "安装包校验失败")
+            self.assertEqual(payload["solution_details"], "回退版本")
+            self.assertIn("user_solution", payload)
 
 
 if __name__ == "__main__":
