@@ -22,7 +22,6 @@
         {
           "level_1": "候选一级分类",
           "level_2": "候选二级分类",
-          "confidence": 0.91,
           "inline_features": ["该二级分类下的 level3 补充信息"]
         }
       ],
@@ -47,6 +46,7 @@
 - `record` 必须包含 `id`、`problem_overview`、`probelm_details`、`solution_details`、`user_solution`。
 - 字段名固定为 `probelm_details`，不要改成 `problem_details`。
 - `user_solution` 是三个原始字段的合并文本；优先使用结构化字段判断，字段缺失时再参考 `user_solution`。
+- `candidate_pool` 中每个候选只包含 `level_1`、`level_2`、`inline_features`，不包含 TopK 置信度。
 - `inline_features` 是该二级分类下全部 level3 补充信息，只能作为判断证据，不允许作为最终分类输出。
 - `rag_results` 只能作为证据，不能引入候选池外分类。
 - `out_of_candidate_pool_reference=true` 的 RAG 样例只可参考表达方式，不可决定分类。

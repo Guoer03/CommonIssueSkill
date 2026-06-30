@@ -17,6 +17,7 @@
   - `top1_confidence >= 0.85` 且 `top1 - top2 >= 0.15` 时最多 3 个；
   - 其他情况最多 6 个；
   - TopK 返回更少候选时不补齐。
+- TopK 置信度只供 Runner 排序和动态扩缩候选池使用。传入 Final prompt 的 `candidate_pool` 必须移除 `confidence`，每个候选只保留 `level_1`、`level_2`、`inline_features`。
 
 ## Final 复核状态
 

@@ -14,6 +14,7 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 RUNNER = SKILL_DIR / "scripts" / "run_pipeline.py"
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
 
+import run_pipeline  # noqa: E402
 from run_pipeline import (  # noqa: E402
     DEFAULT_CLASSIFICATION_OPTIONS,
     RunnerError,
@@ -24,6 +25,31 @@ from run_pipeline import (  # noqa: E402
 
 
 class RunPipelineTest(unittest.TestCase):
+    def test_candidate_pool_for_final_removes_topk_confidence(self) -> None:
+        self.assertTrue(hasattr(run_pipeline, "candidate_pool_for_final"))
+        candidate_pool = run_pipeline.candidate_pool_for_final(
+            [
+                {
+                    "level_1": "操作维护类失效",
+                    "level_2": "系统升级/安装失效",
+                    "confidence": 0.93,
+                    "inline_features": ["安装包校验失败"],
+                }
+            ]
+        )
+
+        self.assertEqual(
+            candidate_pool,
+            [
+                {
+                    "level_1": "操作维护类失效",
+                    "level_2": "系统升级/安装失效",
+                    "inline_features": ["安装包校验失败"],
+                }
+            ],
+        )
+        self.assertNotIn("confidence", candidate_pool[0])
+
     def test_build_record_payload_uses_structured_record_schema(self) -> None:
         payload = build_record_payload(
             {

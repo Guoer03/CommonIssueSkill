@@ -383,6 +383,17 @@ def dynamic_candidate_pool(candidates: Sequence[Mapping[str, Any]]) -> List[Dict
     return ordered[:keep]
 
 
+def candidate_pool_for_final(candidates: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "level_1": str(candidate.get("level_1", "")).strip(),
+            "level_2": str(candidate.get("level_2", "")).strip(),
+            "inline_features": list(candidate.get("inline_features", [])),
+        }
+        for candidate in candidates
+    ]
+
+
 def command_topk(args: argparse.Namespace) -> None:
     options = read_json(args.workdir / "classification_options.json")
     conn = connect(args.workdir)
@@ -473,7 +484,7 @@ def command_final(args: argparse.Namespace) -> None:
                 {
                     "record_index": offset,
                     "record": load_record_payload(row["record_text"]),
-                    "candidate_pool": candidates,
+                    "candidate_pool": candidate_pool_for_final(candidates),
                     "rag_results": rag["final_rag"],
                 }
             )
