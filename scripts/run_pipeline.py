@@ -341,6 +341,14 @@ def load_template(name: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def load_prompt_parts(names: Sequence[str]) -> str:
+    return "\n\n".join(load_template(name).strip() for name in names)
+
+
+def load_topk_prompt_template() -> str:
+    return load_prompt_parts(["topk_prompt.md", "topk_io_contract.md"])
+
+
 def pending_topk_records(conn: sqlite3.Connection, limit: int) -> List[sqlite3.Row]:
     return conn.execute(
         """
@@ -403,7 +411,7 @@ def command_topk(args: argparse.Namespace) -> None:
         print("No pending topk records")
         return
 
-    template = load_template("topk_prompt.md")
+    template = load_topk_prompt_template()
     endpoint = normalize_endpoint(args.base_url)
     key = api_key(args.api_key_env)
     processed = 0

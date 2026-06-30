@@ -25,6 +25,14 @@ from run_pipeline import (  # noqa: E402
 
 
 class RunPipelineTest(unittest.TestCase):
+    def test_topk_prompt_is_assembled_from_principles_and_io_contract(self) -> None:
+        prompt = run_pipeline.load_topk_prompt_template()
+
+        self.assertLess(prompt.index("TopK Role And Principles"), prompt.index("TopK IO Contract"))
+        self.assertIn("records", prompt)
+        self.assertTrue((SKILL_DIR / "references" / "topk_prompt.md").exists())
+        self.assertTrue((SKILL_DIR / "references" / "topk_io_contract.md").exists())
+
     def test_candidate_pool_for_final_removes_topk_confidence(self) -> None:
         self.assertTrue(hasattr(run_pipeline, "candidate_pool_for_final"))
         candidate_pool = run_pipeline.candidate_pool_for_final(
