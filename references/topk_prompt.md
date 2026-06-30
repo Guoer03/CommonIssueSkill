@@ -1,4 +1,4 @@
-# TopK Prompt
+# TopK Prompt Contract
 
 用于从用户提供的分类选项中，为每条问题记录召回候选一级/二级分类。
 

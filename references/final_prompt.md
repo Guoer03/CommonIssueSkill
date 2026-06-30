@@ -1,4 +1,4 @@
-# Final Prompt
+# Final Prompt Contract
 
 用于在 TopK 候选池、内联 level3 特征和 RAG 证据的约束下，选择最终唯一一级/二级分类。
 

@@ -14,10 +14,16 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 RUNNER = SKILL_DIR / "scripts" / "run_pipeline.py"
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
 
-from run_pipeline import RunnerError, run_with_retries  # noqa: E402
+from run_pipeline import DEFAULT_CLASSIFICATION_OPTIONS, RunnerError, run_with_retries  # noqa: E402
 
 
 class RunPipelineTest(unittest.TestCase):
+    def test_reference_inputs_are_packaged_with_the_skill(self) -> None:
+        self.assertEqual(DEFAULT_CLASSIFICATION_OPTIONS, SKILL_DIR / "references" / "classification_options.json")
+        self.assertTrue(DEFAULT_CLASSIFICATION_OPTIONS.exists())
+        self.assertTrue((SKILL_DIR / "references" / "topk_prompt.md").exists())
+        self.assertTrue((SKILL_DIR / "references" / "final_prompt.md").exists())
+
     def test_run_with_retries_retries_transient_batch_failures(self) -> None:
         calls = 0
 

@@ -29,6 +29,7 @@ from pipeline_core import (
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 REFERENCE_DIR = SKILL_DIR / "references"
+DEFAULT_CLASSIFICATION_OPTIONS = REFERENCE_DIR / "classification_options.json"
 
 FIELD_ALIASES = {
     "overview": ["问题概述", "overview", "summary", "title"],
@@ -191,8 +192,11 @@ def command_init(args: argparse.Namespace) -> None:
     workdir = args.workdir
     workdir.mkdir(parents=True, exist_ok=True)
     options = read_json(args.classification_options)
-    if not isinstance(options, dict):
-        raise SystemExit("classification_options must be a JSON object")
+    if not isinstance(options, dict) or not options:
+        raise SystemExit(
+            "classification_options must be a non-empty JSON object. "
+            "Fill references/classification_options.json or pass --classification-options."
+        )
     write_json(workdir / "classification_options.json", options)
 
     rows = read_rows(args.input)
@@ -350,7 +354,7 @@ def command_topk(args: argparse.Namespace) -> None:
         print("No pending topk records")
         return
 
-    template = load_template("topk-prompt.md")
+    template = load_template("topk_prompt.md")
     endpoint = normalize_endpoint(args.base_url)
     key = api_key(args.api_key_env)
     processed = 0
@@ -413,7 +417,7 @@ def command_final(args: argparse.Namespace) -> None:
         print("No pending final records")
         return
 
-    template = load_template("final-prompt.md")
+    template = load_template("final_prompt.md")
     endpoint = normalize_endpoint(args.base_url)
     key = api_key(args.api_key_env)
     processed = 0
@@ -541,7 +545,7 @@ def main() -> None:
 
     init_parser = subparsers.add_parser("init", help="Create a stateful run workspace")
     init_parser.add_argument("--input", type=Path, required=True)
-    init_parser.add_argument("--classification-options", type=Path, required=True)
+    init_parser.add_argument("--classification-options", type=Path, default=DEFAULT_CLASSIFICATION_OPTIONS)
     init_parser.add_argument("--workdir", type=Path, required=True)
     init_parser.add_argument("--record-column")
     init_parser.add_argument("--rag-jsonl", type=Path)
