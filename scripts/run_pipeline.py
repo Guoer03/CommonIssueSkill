@@ -7,11 +7,14 @@ import argparse
 import csv
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
@@ -32,12 +35,49 @@ REFERENCE_DIR = SKILL_DIR / "references"
 DEFAULT_CLASSIFICATION_OPTIONS = REFERENCE_DIR / "classification_options.json"
 
 FIELD_ALIASES = {
-    "problem_overview": ["problem_overview", "问题概述", "overview", "summary", "title"],
-    "probelm_details": ["probelm_details", "problem_details", "问题明细", "detail", "details", "description", "desc"],
-    "solution_details": ["solution_details", "解决方案", "solution", "resolution", "fix"],
+    "id": ["id", "record_id", "case_id", "ticket_id", "工单编号", "问题编号", "记录编号", "单号", "编号"],
+    "problem_overview": [
+        "problem_overview",
+        "问题概述",
+        "问题标题",
+        "故障标题",
+        "概述",
+        "标题",
+        "overview",
+        "summary",
+        "title",
+    ],
+    "probelm_details": [
+        "probelm_details",
+        "problem_details",
+        "问题明细",
+        "问题详情",
+        "问题描述",
+        "故障现象",
+        "故障详情",
+        "现象描述",
+        "detail",
+        "details",
+        "description",
+        "desc",
+    ],
+    "solution_details": [
+        "solution_details",
+        "解决方案",
+        "处理方案",
+        "解决措施",
+        "处理措施",
+        "处理结果",
+        "solution",
+        "resolution",
+        "fix",
+    ],
 }
 
+RECORD_INPUT_FIELDS = ["id", "problem_overview", "probelm_details", "solution_details"]
 RECORD_SCHEMA_FIELDS = ["id", "problem_overview", "probelm_details", "solution_details", "user_solution"]
+EXCEL_SUFFIXES = {".xlsx", ".xlsm"}
+OFFICE_REL_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 
 EXPORT_COLUMNS = [
     "record_index",
@@ -50,6 +90,45 @@ EXPORT_COLUMNS = [
     "mapping_justification",
     "topk_candidates",
 ]
+
+PYTHON_RUNTIME_CONFIG = {
+    # Edit this block for intranet defaults. Keep real API keys in the
+    # environment variable named by api_key_env, not in this file.
+    "base_url": "https://api.openai.com/v1",
+    "model": None,
+    "api_key_env": "ISSUE_CLASSIFIER_API_KEY",
+    "batch_size": 20,
+    "limit": 200,
+    "timeout": 90.0,
+    "temperature": 0.0,
+    "max_tokens": 4096,
+    "topk_rag_k": 3,
+    "final_rag_k": 5,
+    "review_threshold": 0.72,
+    "max_retries": 2,
+    "continue_on_failure": False,
+}
+
+RUNTIME_ENV = {
+    "base_url": "ISSUE_CLASSIFIER_BASE_URL",
+    "model": "ISSUE_CLASSIFIER_MODEL",
+}
+
+RUNTIME_TYPES = {
+    "base_url": str,
+    "model": str,
+    "api_key_env": str,
+    "batch_size": int,
+    "limit": int,
+    "timeout": float,
+    "temperature": float,
+    "max_tokens": int,
+    "topk_rag_k": int,
+    "final_rag_k": int,
+    "review_threshold": float,
+    "max_retries": int,
+    "continue_on_failure": bool,
+}
 
 
 class RunnerError(RuntimeError):
@@ -68,6 +147,46 @@ def write_json(path: Path, payload: Any) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def coerce_runtime_value(key: str, value: Any) -> Any:
+    expected_type = RUNTIME_TYPES[key]
+    if value is None:
+        return None
+    if expected_type is bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "y", "on"}:
+                return True
+            if lowered in {"0", "false", "no", "n", "off"}:
+                return False
+        if isinstance(value, (int, float)):
+            return bool(value)
+        raise SystemExit(f"Invalid boolean runtime config value for {key}: {value!r}")
+    try:
+        return expected_type(value)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"Invalid runtime config value for {key}: {value!r}") from exc
+
+
+def resolve_runtime_config(args: argparse.Namespace, env: Optional[Mapping[str, str]] = None) -> argparse.Namespace:
+    source_env = os.environ if env is None else env
+    for key, python_value in PYTHON_RUNTIME_CONFIG.items():
+        if not hasattr(args, key):
+            continue
+        cli_value = getattr(args, key)
+        if cli_value is not None:
+            value = cli_value
+        elif python_value is not None and python_value != "":
+            value = coerce_runtime_value(key, python_value)
+        elif key in RUNTIME_ENV and source_env.get(RUNTIME_ENV[key]):
+            value = coerce_runtime_value(key, source_env[RUNTIME_ENV[key]])
+        else:
+            value = python_value
+        setattr(args, key, value)
+    return args
 
 
 def connect(workdir: Path) -> sqlite3.Connection:
@@ -114,6 +233,133 @@ def create_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def column_index(cell_ref: str) -> int:
+    match = re.match(r"([A-Z]+)", cell_ref.upper())
+    if not match:
+        return 0
+    index = 0
+    for char in match.group(1):
+        index = index * 26 + ord(char) - ord("A") + 1
+    return index - 1
+
+
+def first_xlsx_sheet_path(zf: zipfile.ZipFile) -> str:
+    fallback = "xl/worksheets/sheet1.xml"
+    try:
+        workbook = ET.fromstring(zf.read("xl/workbook.xml"))
+        rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+    except (KeyError, ET.ParseError):
+        return fallback
+
+    first_sheet_id = ""
+    for node in workbook.iter():
+        if local_name(node.tag) == "sheet":
+            first_sheet_id = node.get(f"{OFFICE_REL_NS}id", "")
+            break
+    if not first_sheet_id:
+        return fallback
+
+    for rel in rels.iter():
+        if local_name(rel.tag) != "Relationship" or rel.get("Id") != first_sheet_id:
+            continue
+        target = rel.get("Target", "")
+        if not target:
+            return fallback
+        if target.startswith("/"):
+            return target.lstrip("/")
+        if target.startswith("xl/"):
+            return target
+        return f"xl/{target}"
+    return fallback
+
+
+def read_xlsx_shared_strings(zf: zipfile.ZipFile) -> List[str]:
+    try:
+        root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+    except KeyError:
+        return []
+    except ET.ParseError as exc:
+        raise SystemExit(f"Invalid XLSX sharedStrings.xml: {exc}") from exc
+
+    values: List[str] = []
+    for item in root.iter():
+        if local_name(item.tag) != "si":
+            continue
+        texts = [node.text or "" for node in item.iter() if local_name(node.tag) == "t"]
+        values.append("".join(texts))
+    return values
+
+
+def xlsx_cell_value(cell: ET.Element, shared_strings: Sequence[str]) -> str:
+    cell_type = cell.get("t", "")
+    text_parts: List[str] = []
+    if cell_type == "inlineStr":
+        for node in cell.iter():
+            if local_name(node.tag) == "t":
+                text_parts.append(node.text or "")
+        return "".join(text_parts).strip()
+
+    raw = ""
+    for child in cell:
+        if local_name(child.tag) == "v":
+            raw = child.text or ""
+            break
+    if cell_type == "s" and raw:
+        try:
+            return shared_strings[int(raw)].strip()
+        except (IndexError, ValueError):
+            return ""
+    return raw.strip()
+
+
+def read_xlsx_rows(path: Path) -> List[Dict[str, Any]]:
+    try:
+        with zipfile.ZipFile(path) as zf:
+            shared_strings = read_xlsx_shared_strings(zf)
+            sheet_path = first_xlsx_sheet_path(zf)
+            try:
+                sheet = ET.fromstring(zf.read(sheet_path))
+            except KeyError as exc:
+                raise SystemExit(f"XLSX first worksheet not found: {sheet_path}") from exc
+    except zipfile.BadZipFile as exc:
+        raise SystemExit(f"Invalid XLSX file: {path}") from exc
+    except ET.ParseError as exc:
+        raise SystemExit(f"Invalid XLSX worksheet XML: {exc}") from exc
+
+    table: List[List[str]] = []
+    for row in sheet.iter():
+        if local_name(row.tag) != "row":
+            continue
+        values: List[str] = []
+        for cell in row:
+            if local_name(cell.tag) != "c":
+                continue
+            index = column_index(cell.get("r", "")) if cell.get("r") else len(values)
+            while len(values) <= index:
+                values.append("")
+            values[index] = xlsx_cell_value(cell, shared_strings)
+        if any(value.strip() for value in values):
+            table.append(values)
+
+    if not table:
+        return []
+    headers = [value.strip() for value in table[0]]
+    rows: List[Dict[str, Any]] = []
+    for values in table[1:]:
+        row = {
+            header: values[index].strip() if index < len(values) else ""
+            for index, header in enumerate(headers)
+            if header
+        }
+        if any(str(value).strip() for value in row.values()):
+            rows.append(row)
+    return rows
+
+
 def read_rows(path: Path) -> List[Dict[str, Any]]:
     suffix = path.suffix.lower()
     if suffix == ".jsonl":
@@ -138,7 +384,154 @@ def read_rows(path: Path) -> List[Dict[str, Any]]:
             if not reader.fieldnames:
                 raise SystemExit(f"Input table has no header: {path}")
             return list(reader)
+    if suffix in {".xlsx", ".xlsm"}:
+        return read_xlsx_rows(path)
     raise SystemExit(f"Unsupported input file: {path}")
+
+
+def is_excel_input(path: Path) -> bool:
+    return path.suffix.lower() in EXCEL_SUFFIXES
+
+
+def ordered_columns(rows: Sequence[Mapping[str, Any]]) -> List[str]:
+    columns: List[str] = []
+    seen = set()
+    for row in rows:
+        for key in row.keys():
+            if key not in seen:
+                columns.append(str(key))
+                seen.add(key)
+    return columns
+
+
+def normalized_header(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return re.sub(r"[\s_\-./\\:：,，;；()（）\[\]【】{}]+", "", text)
+
+
+def header_match_score(header: str, aliases: Sequence[str]) -> int:
+    normalized = normalized_header(header)
+    if not normalized:
+        return 0
+    best = 0
+    for alias in aliases:
+        normalized_alias = normalized_header(alias)
+        if not normalized_alias:
+            continue
+        if normalized == normalized_alias:
+            return 100
+        if len(normalized_alias) >= 3 and (normalized_alias in normalized or normalized in normalized_alias):
+            best = max(best, 80)
+    return best
+
+
+def infer_field_mapping(columns: Sequence[str]) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    used_columns = set()
+    for field in RECORD_INPUT_FIELDS:
+        best_column = ""
+        best_score = 0
+        for column in columns:
+            if column in used_columns:
+                continue
+            score = header_match_score(column, FIELD_ALIASES[field])
+            if score > best_score:
+                best_column = column
+                best_score = score
+        if best_score >= 80:
+            mapping[field] = best_column
+            used_columns.add(best_column)
+        else:
+            mapping[field] = ""
+    return mapping
+
+
+def load_field_map(path: Path) -> Dict[str, str]:
+    payload = read_json(path)
+    if not isinstance(payload, dict):
+        raise SystemExit(f"field map must be a JSON object: {path}")
+    raw = payload.get("field_map") or payload.get("inferred_field_map") or payload
+    if not isinstance(raw, dict):
+        raise SystemExit(f"field map must contain a JSON object: {path}")
+    return {field: str(raw.get(field, "") or "").strip() for field in RECORD_INPUT_FIELDS}
+
+
+def validate_field_map(field_map: Mapping[str, str], columns: Sequence[str]) -> None:
+    column_set = set(columns)
+    missing = [
+        f"{field} -> {source}"
+        for field, source in field_map.items()
+        if source and source not in column_set
+    ]
+    if missing:
+        raise SystemExit("field_map references columns not present in input: " + ", ".join(missing))
+    if not any(field_map.get(field) for field in ["problem_overview", "probelm_details", "solution_details"]):
+        raise SystemExit(
+            "field_map must map at least one of problem_overview, probelm_details, or solution_details."
+        )
+
+
+def apply_field_map(row: Mapping[str, Any], field_map: Mapping[str, str]) -> Dict[str, str]:
+    mapped: Dict[str, str] = {}
+    for field in RECORD_INPUT_FIELDS:
+        source = str(field_map.get(field, "") or "").strip()
+        mapped[field] = str(row.get(source, "") or "").strip() if source else ""
+    return mapped
+
+
+def sample_records(rows: Sequence[Mapping[str, Any]], field_map: Mapping[str, str], sample_size: int) -> List[Dict[str, str]]:
+    samples: List[Dict[str, str]] = []
+    for index, row in enumerate(rows[: max(0, sample_size)]):
+        mapped = apply_field_map(row, field_map)
+        record_id = str(mapped.get("id") or index).strip()
+        samples.append(build_record_payload(mapped, record_column=None, record_id=record_id))
+    return samples
+
+
+def input_inspection_payload(path: Path, sample_size: int) -> Dict[str, Any]:
+    rows = read_rows(path)
+    columns = ordered_columns(rows)
+    field_map = infer_field_mapping(columns)
+    return {
+        "input": str(path),
+        "row_count": len(rows),
+        "columns": columns,
+        "field_map": field_map,
+        "sample_records": sample_records(rows, field_map, sample_size),
+        "confirmation_required": is_excel_input(path),
+        "next_step": (
+            "确认或编辑 field_map 后，运行 init --field-map <field_map_review.json>。"
+            "仅在确信自动推断正确时才使用 --auto-field-map。"
+        ),
+    }
+
+
+def command_inspect_input(args: argparse.Namespace) -> None:
+    payload = input_inspection_payload(args.input, args.sample_size)
+    if args.out:
+        write_json(args.out, payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def resolve_field_map(args: argparse.Namespace, rows: Sequence[Mapping[str, Any]]) -> Optional[Dict[str, str]]:
+    columns = ordered_columns(rows)
+    if args.field_map:
+        field_map = load_field_map(args.field_map)
+        validate_field_map(field_map, columns)
+        return field_map
+    if is_excel_input(args.input) and not args.record_column:
+        if args.auto_field_map:
+            field_map = infer_field_mapping(columns)
+            validate_field_map(field_map, columns)
+            return field_map
+        raise SystemExit(
+            "Excel input requires confirmed field mapping. Run inspect-input first, for example: "
+            f"python3 {Path(__file__).resolve()} inspect-input --input {args.input} "
+            "--out <workdir>/field_map_review.json. Confirm or edit field_map, then rerun init "
+            "with --field-map <workdir>/field_map_review.json. Use --auto-field-map only when the "
+            "inferred mapping is already trusted."
+        )
+    return None
 
 
 def first_value(row: Mapping[str, Any], keys: Sequence[str]) -> str:
@@ -223,16 +616,17 @@ def load_rag_map(path: Optional[Path]) -> Dict[str, List[Dict[str, Any]]]:
 
 def command_init(args: argparse.Namespace) -> None:
     workdir = args.workdir
-    workdir.mkdir(parents=True, exist_ok=True)
     options = read_json(args.classification_options)
     if not isinstance(options, dict) or not options:
         raise SystemExit(
             "classification_options must be a non-empty JSON object. "
             "Fill references/classification_options.json or pass --classification-options."
         )
-    write_json(workdir / "classification_options.json", options)
-
     rows = read_rows(args.input)
+    field_map = resolve_field_map(args, rows)
+
+    workdir.mkdir(parents=True, exist_ok=True)
+    write_json(workdir / "classification_options.json", options)
     rag_map = load_rag_map(args.rag_jsonl)
     conn = connect(workdir)
     create_schema(conn)
@@ -241,8 +635,9 @@ def command_init(args: argparse.Namespace) -> None:
         conn.execute("delete from topk_results")
         conn.execute("delete from final_results")
         for index, row in enumerate(rows):
-            record_id = str(row.get("record_id") or row.get("id") or index).strip()
-            record_payload = build_record_payload(row, args.record_column, record_id=record_id)
+            source_row: Mapping[str, Any] = apply_field_map(row, field_map) if field_map else row
+            record_id = str(source_row.get("id") or row.get("record_id") or row.get("id") or index).strip()
+            record_payload = build_record_payload(source_row, args.record_column, record_id=record_id)
             conn.execute(
                 """
                 insert into records(record_index, record_id, record_text, rag_pool_json)
@@ -261,6 +656,8 @@ def command_init(args: argparse.Namespace) -> None:
         "record_count": len(rows),
         "batch_size": args.batch_size,
         "mode": "workspace",
+        "field_map": field_map or {},
+        "field_map_source": str(args.field_map) if args.field_map else ("auto" if field_map else ""),
     }
     write_json(workdir / "manifest.json", manifest)
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
@@ -627,28 +1024,36 @@ def command_export(args: argparse.Namespace) -> None:
 
 
 def add_api_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--base-url", default=os.environ.get("ISSUE_CLASSIFIER_BASE_URL", "https://api.openai.com/v1"))
-    parser.add_argument("--model", default=os.environ.get("ISSUE_CLASSIFIER_MODEL"), required=False)
-    parser.add_argument("--api-key-env", default="ISSUE_CLASSIFIER_API_KEY")
-    parser.add_argument("--batch-size", type=int, default=20)
-    parser.add_argument("--limit", type=int, default=200)
-    parser.add_argument("--timeout", type=float, default=90)
-    parser.add_argument("--temperature", type=float, default=0)
-    parser.add_argument("--max-tokens", type=int, default=4096)
-    parser.add_argument("--topk-rag-k", type=int, default=3)
-    parser.add_argument("--max-retries", type=int, default=2)
-    parser.add_argument("--continue-on-failure", action="store_true")
+    parser.add_argument("--base-url")
+    parser.add_argument("--model", required=False)
+    parser.add_argument("--api-key-env")
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--timeout", type=float)
+    parser.add_argument("--temperature", type=float)
+    parser.add_argument("--max-tokens", type=int)
+    parser.add_argument("--topk-rag-k", type=int)
+    parser.add_argument("--max-retries", type=int)
+    parser.add_argument("--continue-on-failure", action=argparse.BooleanOptionalAction, default=None)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    inspect_parser = subparsers.add_parser("inspect-input", help="Infer input columns and preview normalized records")
+    inspect_parser.add_argument("--input", type=Path, required=True)
+    inspect_parser.add_argument("--out", type=Path)
+    inspect_parser.add_argument("--sample-size", type=int, default=3)
+    inspect_parser.set_defaults(func=command_inspect_input)
+
     init_parser = subparsers.add_parser("init", help="Create a stateful run workspace")
     init_parser.add_argument("--input", type=Path, required=True)
     init_parser.add_argument("--classification-options", type=Path, default=DEFAULT_CLASSIFICATION_OPTIONS)
     init_parser.add_argument("--workdir", type=Path, required=True)
     init_parser.add_argument("--record-column")
+    init_parser.add_argument("--field-map", type=Path)
+    init_parser.add_argument("--auto-field-map", action="store_true")
     init_parser.add_argument("--rag-jsonl", type=Path)
     init_parser.add_argument("--batch-size", type=int, default=20)
     init_parser.set_defaults(func=command_init)
@@ -660,8 +1065,8 @@ def main() -> None:
 
     final_parser = subparsers.add_parser("final", help="Run final stage")
     final_parser.add_argument("--workdir", type=Path, required=True)
-    final_parser.add_argument("--final-rag-k", type=int, default=5)
-    final_parser.add_argument("--review-threshold", type=float, default=0.72)
+    final_parser.add_argument("--final-rag-k", type=int)
+    final_parser.add_argument("--review-threshold", type=float)
     add_api_args(final_parser)
     final_parser.set_defaults(func=command_final)
 
@@ -671,8 +1076,10 @@ def main() -> None:
     export_parser.set_defaults(func=command_export)
 
     args = parser.parse_args()
-    if args.command in {"topk", "final"} and not args.model:
-        raise SystemExit("Missing --model or ISSUE_CLASSIFIER_MODEL")
+    if args.command in {"topk", "final"}:
+        args = resolve_runtime_config(args)
+        if not args.model:
+            raise SystemExit("Missing --model, ISSUE_CLASSIFIER_MODEL, or model in PYTHON_RUNTIME_CONFIG")
     args.func(args)
 
 
