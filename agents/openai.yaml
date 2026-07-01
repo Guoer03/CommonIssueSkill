@@ -1,4 +1,4 @@
 interface:
   display_name: "问题分类流水线"
-  short_description: "支持20w级记录的两阶段问题分类流水线"
-  default_prompt: "使用 $issue-classification-pipeline 按我提供的分类选项，对问题记录进行 TopK 候选召回和 Final 最终分类。"
+  short_description: "支持小批量和 Excel 工作副本的问题分类"
+  default_prompt: "使用 $issue-classification-pipeline 按我提供的分类选项，对 10 条以下记录或一个 Excel 文件进行问题分类。"

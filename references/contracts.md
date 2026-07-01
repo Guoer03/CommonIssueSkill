@@ -1,41 +1,50 @@
-# Pipeline Contracts
+# Classification Contracts
 
-## RAG 复用
+## Excel Workfile
 
-- 每条记录只执行一次 RAG 检索，生成 `rag_pool`。
-- RAG 召回结果应使用 JSONL；`scripts/rag_retrieve.py` 预留给内网实现召回逻辑。每行是一条待分类记录与一条历史样例的匹配结果。
-- 每行至少包含 `record_id`、`case_id`、`record`、`level_1`、`level_2`、`similarity`。`record_id` 必须能匹配待分类记录的 `id` 或 `record_id`。
-- `level_1/level_2` 必须来自当前 `classification_options`；taxonomy 外样例应在召回阶段过滤。
-- TopK 使用 `rag_pool` 中相似度最高的 3 条。
-- Final 使用同一个 `rag_pool`，优先选择 `level_1/level_2` 属于候选池的样例，最多 5 条。
-- 候选池内样例不足时，可补充全局高相似样例，但必须标记 `out_of_candidate_pool_reference=true`。
-- RAG 永远不能引入 classification_options 或 candidate_pool 外的新分类。
+- 原始 Excel 不直接覆盖；先复制成 `.classifying.xlsx` 工作副本。
+- Excel 工作副本是批量处理状态载体；已写回的 `status`、`needs_review`、`selected_level_1`、`selected_level_2` 等列用于断点续跑。
+- 每次只把当前 pending/retry batch 放进上下文，默认 10 条；长文本或上下文压力大时使用 5 条。不要把历史已处理记录追加进 prompt。
+- 分类只能依据当前轮 batch、当前轮可用的 RAG 召回数据和分类选项。不要参考历史对话、历史 batch、此前已处理记录或由历史记录总结出的“分类经验”。
+- `next-batch` 导出 `status` 为空、`pending`、`retry`、`unresolved`、`failed` 或其他非完成状态的行；`classified`、`low_confidence` 视为已成功分类。
+- 未尝试 pending 行优先进入 batch；retry/unresolved/failed 行排在后面，避免单条异常阻塞后续记录。
+- `apply-results` 写回前必须规范化名称并校验 `selected_level_1/selected_level_2` 是否来自 `classification_options`。
+- 非法分类不强行修正，写入 `status=retry`、`needs_review=true` 和 `error_message`，后续循环继续处理。
+- `status` 命令只有在所有数据行都是 `classified` 或 `low_confidence` 时才输出 `complete=true`。
 
-## TopK 候选池
+## 证据优先级
+
+分类判断按以下优先级取证：
+
+1. 问题根因或问题明细中明确描述的直接原因。
+2. 问题明细中的现象、告警、对象、模块、失败环节。
+3. 解决方案只在根因或明细缺失时作为辅助判断；不能仅凭“升级、重启、倒换、更换”等处理动作决定分类。
+4. 问题概述只作为兜底线索。
+
+## TopK 候选
 
 - TopK 只输出 `level_1`、`level_2`、`confidence`。
-- Runner 必须校验候选存在于 `classification_options`。
-- Runner 从 `classification_options[level_1][level_2]` 注入 `inline_features`，也就是该二级分类下全部 level3。
-- Runner 根据 TopK 置信度动态决定传给 Final 的候选数量：
-  - `top1_confidence >= 0.85` 且 `top1 - top2 >= 0.15` 时最多 3 个；
-  - 其他情况最多 6 个；
-  - TopK 返回更少候选时不补齐。
-- TopK 置信度只供 Runner 排序和动态扩缩候选池使用。传入 Final prompt 的 `candidate_pool` 必须移除 `confidence`，每个候选只保留 `level_1`、`level_2`、`inline_features`。
+- 候选必须来自 `classification_options`。
+- 当前模型应根据 TopK 置信度控制候选数量：
+  - `top1_confidence >= 0.85` 且 `top1 - top2 >= 0.15` 时最多保留 3 个；
+  - 其他情况最多保留 6 个；
+  - 证据不足时可以少于 3 个，甚至 0 个。
+- TopK 置信度只用于排序和扩缩候选池。传入 Final 的 `candidate_pool` 不包含 TopK 置信度，只包含 `level_1`、`level_2`、`inline_features`。
 
 ## Final 复核状态
 
-Final 输出 `confidence`，Runner 派生状态：
+Final 输出 `confidence`，写回时派生状态：
 
-- TopK 无候选：`status=unresolved`，跳过 Final，`needs_review=true`。
-- Final 输出空分类：`status=unresolved`，`needs_review=true`。
+- TopK 无候选或 Final 空分类：`status=retry`，`needs_review=true`，后续循环必须重新分类。
 - Final `confidence < review_threshold`：`status=low_confidence`，`needs_review=true`。
 - Final 分类合法且置信度达标：`status=classified`，`needs_review=false`。
+- 输出非法分类：`status=retry`，`needs_review=true`。
 
 默认 `review_threshold=0.72`。
 
 ## 名称规范化和合法性校验
 
-Runner 必须规范化模型输出再校验：
+写回结果前必须规范化模型输出再校验：
 
 - 去除首尾空白；
 - 全角转半角；
@@ -47,10 +56,5 @@ Runner 必须规范化模型输出再校验：
 
 - TopK 输出的 `level_1` 必须存在于 `classification_options`。
 - TopK 输出的 `level_2` 必须属于该 `level_1`。
-- Final 输出的 `selected_level_1/selected_level_2` 必须来自该记录的 `candidate_pool`。
+- Final 输出的 `selected_level_1/selected_level_2` 必须来自 `classification_options`。二者都为空只能作为临时 retry，不是最终完成结果。
 - level3 不允许作为 TopK 或 Final 的分类输出。
-- 非法输出应重试；重试后仍非法则进入 `failed` 或 `needs_review`。
-
-## Workspace 状态
-
-每次批量任务状态都放在 `workdir/state.sqlite`。Skill 目录不保存任何业务状态。

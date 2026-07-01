@@ -13,10 +13,8 @@ from pipeline_core import (  # noqa: E402
     ContractError,
     derive_final_status,
     enrich_candidate_pool,
-    parse_final_xml,
-    parse_topk_xml,
-    select_rag_for_stages,
     validate_final_selection,
+    validate_taxonomy_selection,
 )
 
 
@@ -32,32 +30,22 @@ CLASSIFICATION_OPTIONS = {
 
 
 class PipelineContractTest(unittest.TestCase):
-    def test_topk_xml_is_parsed_validated_and_enriched_with_level3_features(self) -> None:
-        xml = """
-        <results>
-          <result>
-            <record_index>0</record_index>
-            <thinking_process>命中升级失败和安装异常。</thinking_process>
-            <candidates>
-              <candidate>
-                <level_1> 操作维护类失效 </level_1>
-                <level_2>系统升级／安装失效</level_2>
-                <confidence>0.91</confidence>
-              </candidate>
-              <candidate>
-                <level_1>操作维护类失效</level_1>
-                <level_2>监控 / 跟踪失效</level_2>
-                <confidence>0.51</confidence>
-              </candidate>
-            </candidates>
-          </result>
-        </results>
-        """
+    def test_topk_candidates_are_validated_and_enriched_with_level3_features(self) -> None:
+        candidates = [
+            {
+                "level_1": " 操作维护类失效 ",
+                "level_2": "系统升级／安装失效",
+                "confidence": 0.91,
+            },
+            {
+                "level_1": "操作维护类失效",
+                "level_2": "监控 / 跟踪失效",
+                "confidence": 0.51,
+            },
+        ]
 
-        parsed = parse_topk_xml(xml)
-        candidate_pool = enrich_candidate_pool(parsed[0]["candidates"], CLASSIFICATION_OPTIONS)
+        candidate_pool = enrich_candidate_pool(candidates, CLASSIFICATION_OPTIONS)
 
-        self.assertEqual(parsed[0]["record_index"], 0)
         self.assertEqual(candidate_pool[0]["level_1"], "操作维护类失效")
         self.assertEqual(candidate_pool[0]["level_2"], "系统升级/安装失效")
         self.assertEqual(candidate_pool[0]["confidence"], 0.91)
@@ -72,76 +60,53 @@ class PipelineContractTest(unittest.TestCase):
                 "inline_features": ["安装包校验失败"],
             }
         ]
-        xml = """
-        <results>
-          <result>
-            <record_index>0</record_index>
-            <thinking_process>候选与根因部分匹配。</thinking_process>
-            <selected_level_1>操作维护类失效</selected_level_1>
-            <selected_level_2>系统升级／安装失效</selected_level_2>
-            <mapping_justification>根因提到升级后安装包校验失败，与候选分类的 level3 特征匹配。</mapping_justification>
-            <confidence>0.61</confidence>
-          </result>
-        </results>
-        """
+        final_row = {
+            "selected_level_1": "操作维护类失效",
+            "selected_level_2": "系统升级／安装失效",
+            "mapping_justification": "根因提到升级后安装包校验失败，与候选分类的 level3 特征匹配。",
+            "confidence": 0.61,
+        }
 
-        final_rows = parse_final_xml(xml)
-        validated = validate_final_selection(final_rows[0], candidate_pool)
+        validated = validate_final_selection(final_row, candidate_pool)
         status = derive_final_status(candidate_pool, validated, review_threshold=0.72)
 
         self.assertEqual(validated["selected_level_2"], "系统升级/安装失效")
         self.assertEqual(status["status"], "low_confidence")
         self.assertTrue(status["needs_review"])
 
-        bad_xml = """
-        <result>
-          <record_index>0</record_index>
-          <selected_level_1>网络资源类失效</selected_level_1>
-          <selected_level_2>链路中断</selected_level_2>
-          <mapping_justification>错误地跳出了候选池。</mapping_justification>
-          <confidence>0.9</confidence>
-        </result>
-        """
         with self.assertRaisesRegex(ContractError, "not in candidate pool"):
-            validate_final_selection(parse_final_xml(bad_xml)[0], candidate_pool)
+            validate_final_selection(
+                {
+                    "selected_level_1": "网络资源类失效",
+                    "selected_level_2": "链路中断",
+                    "mapping_justification": "错误地跳出了候选池。",
+                    "confidence": 0.9,
+                },
+                candidate_pool,
+            )
 
-    def test_rag_pool_is_reused_for_topk_and_candidate_filtered_final(self) -> None:
-        rag_pool = [
-            {
-                "case_id": "a",
-                "level_1": "操作维护类失效",
-                "level_2": "系统升级/安装失效",
-                "similarity": 0.94,
-            },
-            {
-                "case_id": "b",
-                "level_1": "网络资源类失效",
-                "level_2": "链路中断",
-                "similarity": 0.92,
-            },
-            {
-                "case_id": "c",
-                "level_1": "操作维护类失效",
-                "level_2": "监控/跟踪失效",
-                "similarity": 0.9,
-            },
-            {
-                "case_id": "d",
-                "level_1": "操作维护类失效",
-                "level_2": "系统升级/安装失效",
-                "similarity": 0.88,
-            },
-        ]
-        candidate_pool = [
-            {"level_1": "操作维护类失效", "level_2": "系统升级/安装失效"},
-        ]
+    def test_final_selection_can_be_validated_directly_against_taxonomy(self) -> None:
+        row = {
+            "selected_level_1": " 操作维护类失效 ",
+            "selected_level_2": "系统升级／安装失效",
+            "confidence": "0.88",
+        }
 
-        selected = select_rag_for_stages(rag_pool, candidate_pool, topk_k=3, final_k=3)
+        validated = validate_taxonomy_selection(row, CLASSIFICATION_OPTIONS)
 
-        self.assertEqual([item["case_id"] for item in selected["topk_rag"]], ["a", "b", "c"])
-        self.assertEqual([item["case_id"] for item in selected["final_rag"]], ["a", "d", "b"])
-        self.assertFalse(selected["final_rag"][0]["out_of_candidate_pool_reference"])
-        self.assertTrue(selected["final_rag"][2]["out_of_candidate_pool_reference"])
+        self.assertEqual(validated["selected_level_1"], "操作维护类失效")
+        self.assertEqual(validated["selected_level_2"], "系统升级/安装失效")
+        self.assertEqual(validated["confidence"], 0.88)
+
+        with self.assertRaisesRegex(ContractError, "not in classification_options"):
+            validate_taxonomy_selection(
+                {
+                    "selected_level_1": "网络资源类失效",
+                    "selected_level_2": "不存在二级",
+                    "confidence": 0.9,
+                },
+                CLASSIFICATION_OPTIONS,
+            )
 
 
 if __name__ == "__main__":
